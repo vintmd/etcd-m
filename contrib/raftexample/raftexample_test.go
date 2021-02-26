@@ -165,58 +165,63 @@ func TestCloseProposerInflight(t *testing.T) {
 
 func TestPutAndGetKeyValue(t *testing.T) {
 	clusters := []string{"http://127.0.0.1:9021"}
+	backends := []string{"memory", "boltdb", "leveldb"}
+	cfg := &backendConfig{nodeID: 1}
 
-	proposeC := make(chan string)
-	defer close(proposeC)
+	for i := 0; i < len(backends); i++ {
+		proposeC := make(chan string)
+		defer close(proposeC)
 
-	confChangeC := make(chan raftpb.ConfChange)
-	defer close(confChangeC)
+		confChangeC := make(chan raftpb.ConfChange)
+		defer close(confChangeC)
 
-	var kvs *kvstore
-	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
-	commitC, errorC, snapshotterReady := newRaftNode(1, clusters, false, getSnapshot, proposeC, confChangeC)
+		var kvs KVStore
+		getSnapshot := func() ([]byte, error) { return kvs.Snapshot() }
+		commitC, errorC, snapshotterReady := newRaftNode(1, clusters, false, getSnapshot, proposeC, confChangeC)
+		cfg.backend = backends[i]
+		kvs = newKVStore(cfg, <-snapshotterReady, proposeC, commitC, errorC)
 
-	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+		srv := httptest.NewServer(&httpKVAPI{
+			store:       kvs,
+			confChangeC: confChangeC,
+		})
+		defer srv.Close()
+		defer kvs.Close()
 
-	srv := httptest.NewServer(&httpKVAPI{
-		store:       kvs,
-		confChangeC: confChangeC,
-	})
-	defer srv.Close()
+		// wait server started
+		<-time.After(time.Second * 3)
 
-	// wait server started
-	<-time.After(time.Second * 3)
+		wantKey, wantValue := "test-key", "test-value"
+		url := fmt.Sprintf("%s/%s", srv.URL, wantKey)
+		body := bytes.NewBufferString(wantValue)
+		cli := srv.Client()
 
-	wantKey, wantValue := "test-key", "test-value"
-	url := fmt.Sprintf("%s/%s", srv.URL, wantKey)
-	body := bytes.NewBufferString(wantValue)
-	cli := srv.Client()
+		req, err := http.NewRequest("PUT", url, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "text/html; charset=utf-8")
+		_, err = cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	req, err := http.NewRequest("PUT", url, body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "text/html; charset=utf-8")
-	_, err = cli.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+		// wait for a moment for processing message, otherwise get would be failed.
+		<-time.After(time.Second)
 
-	// wait for a moment for processing message, otherwise get would be failed.
-	<-time.After(time.Second)
+		resp, err := cli.Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	resp, err := cli.Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
+		data, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if gotValue := string(data); wantValue != gotValue {
-		t.Fatalf("expect %s, got %s", wantValue, gotValue)
+		if gotValue := string(data); wantValue != gotValue {
+			t.Fatalf("expect %s, got %s", wantValue, gotValue)
+		}
 	}
 }

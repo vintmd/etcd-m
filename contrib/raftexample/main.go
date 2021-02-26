@@ -21,11 +21,17 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
+type backendConfig struct {
+	backend string
+	nodeID  int
+}
+
 func main() {
 	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated cluster peers")
 	id := flag.Int("id", 1, "node ID")
 	kvport := flag.Int("port", 9121, "key-value server port")
 	join := flag.Bool("join", false, "join an existing cluster")
+	backend := flag.String("backend", "memory", "backend storage,support memory/leveldb/boltdb")
 	flag.Parse()
 
 	proposeC := make(chan string)
@@ -34,11 +40,12 @@ func main() {
 	defer close(confChangeC)
 
 	// raft provides a commit stream for the proposals from the http api
-	var kvs *kvstore
-	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
+	var kvs KVStore
+	getSnapshot := func() ([]byte, error) { return kvs.Snapshot() }
 	commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
-
-	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+	config := &backendConfig{backend: *backend, nodeID: *id}
+	kvs = newKVStore(config, <-snapshotterReady, proposeC, commitC, errorC)
+	defer kvs.Close()
 
 	// the key-value http handler will propose updates to raft
 	serveHttpKVAPI(kvs, *kvport, confChangeC, errorC)
