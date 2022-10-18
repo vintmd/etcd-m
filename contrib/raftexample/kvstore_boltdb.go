@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -70,9 +71,9 @@ func (s *boltdbKVStore) Lookup(key string) (string, bool) {
 	return string(value), true
 }
 
-func (s *boltdbKVStore) Propose(k string, v string) {
+func (s *boltdbKVStore) Propose(k string, v, o string) {
 	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(kv{k, v}); err != nil {
+	if err := gob.NewEncoder(&buf).Encode(kv{k, v, o}); err != nil {
 		log.Fatal(err)
 	}
 	s.proposeC <- buf.String()
@@ -102,9 +103,14 @@ func (s *boltdbKVStore) ReadCommits(commitC <-chan *string, errorC <-chan error)
 		if err := dec.Decode(&dataKv); err != nil {
 			log.Fatalf("raftexample: could not decode message (%v)", err)
 		}
-		log.Printf("key %s", dataKv.Key)
-		s.Put(dataKv.Key, dataKv.Val)
+		log.Printf("key %s op %s", dataKv.Key, dataKv.Op)
+		if dataKv.Op == PutOp {
+			s.Put(dataKv.Key, dataKv.Val)
+		} else if dataKv.Op == DeleteOp {
+			s.Delete(dataKv.Key)
+		}
 	}
+
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)
 	}
@@ -140,6 +146,30 @@ func (s *boltdbKVStore) Put(key, value string) error {
 	log.Printf("backend:%s,put key:%s,value:%s succ", s.config.backend, key, value)
 	return nil
 }
+
+func (s *boltdbKVStore) Delete(key string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// Start a readable transaction.
+	tx, err := s.db.Begin(false)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Use the transaction...
+	bucket := tx.Bucket([]byte("keys"))
+	if bucket == nil {
+		return errors.New("empty buckets")
+	}
+	err = bucket.Delete([]byte(key))
+	if err != nil {
+		log.Printf("backend:%s,delete key:%s failed err: %v", s.config.backend, key, err)
+		return err
+	}
+	log.Printf("backend:%s,delete key:%s succ", s.config.backend, key)
+	return nil
+}
+
 
 func (s *boltdbKVStore) Snapshot() ([]byte, error) {
 	s.mu.RLock()

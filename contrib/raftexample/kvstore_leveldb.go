@@ -58,9 +58,9 @@ func (s *leveldbKVStore) Lookup(key string) (string, bool) {
 	return string(value), true
 }
 
-func (s *leveldbKVStore) Propose(k string, v string) {
+func (s *leveldbKVStore) Propose(k string, v, o string) {
 	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(kv{k, v}); err != nil {
+	if err := gob.NewEncoder(&buf).Encode(kv{k, v, o}); err != nil {
 		log.Fatal(err)
 	}
 	s.proposeC <- buf.String()
@@ -90,8 +90,12 @@ func (s *leveldbKVStore) ReadCommits(commitC <-chan *string, errorC <-chan error
 		if err := dec.Decode(&dataKv); err != nil {
 			log.Fatalf("raftexample: could not decode message (%v)", err)
 		}
-		log.Printf("key %s", dataKv.Key)
-		s.Put(dataKv.Key, dataKv.Val)
+		log.Printf("key %s, op %s", dataKv.Key, dataKv.Op)
+		if dataKv.Op == PutOp {
+			s.Put(dataKv.Key, dataKv.Val)
+		} else if dataKv.Op == DeleteOp {
+			s.Delete(dataKv.Key)
+		}
 	}
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)
@@ -105,6 +109,16 @@ func (s *leveldbKVStore) Put(key, value string) error {
 		return err
 	}
 	log.Printf("backend:%s,put key:%s,value:%s succ", s.config.backend, key, value)
+	return nil
+}
+
+func (s *leveldbKVStore) Delete(key string) error {
+	err := s.db.Delete([]byte(key), nil)
+	if err != nil {
+		log.Printf("failed to delet key %s, err is %v", key, err)
+		return err
+	}
+	log.Printf("backend:%s,delete key:%s,value:%s succ", s.config.backend, key)
 	return nil
 }
 

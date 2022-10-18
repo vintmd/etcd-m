@@ -41,7 +41,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		h.store.Propose(key, string(v))
+		h.store.Propose(key, string(v), PutOp)
 
 		// Optimistic-- no waiting for ack from raft. Value is not yet
 		// committed so a subsequent GET on the key may return old value
@@ -77,18 +77,17 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// As above, optimistic that raft will apply the conf change
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == "DELETE":
-		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
+/*		err := h.deleteNode(key, w)
 		if err != nil {
-			log.Printf("Failed to convert ID for conf change (%v)\n", err)
-			http.Error(w, "Failed on DELETE", http.StatusBadRequest)
 			return
 		}
+*/
 
-		cc := raftpb.ConfChange{
-			Type:   raftpb.ConfChangeRemoveNode,
-			NodeID: nodeId,
+		// todo: alantong how to delete kv from store
+		err := h.deleteKV(key, w)
+		if err != nil {
+			return
 		}
-		h.confChangeC <- cc
 
 		// As above, optimistic that raft will apply the conf change
 		w.WriteHeader(http.StatusNoContent)
@@ -99,6 +98,27 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Allow", "DELETE")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (h *httpKVAPI) deleteNode(uri string, w http.ResponseWriter) error {
+	nodeId, err := strconv.ParseUint(uri[1:], 0, 64)
+	if err != nil {
+		log.Printf("Failed to convert ID for conf change (%v)\n", err)
+		http.Error(w, "Failed on DELETE", http.StatusBadRequest)
+		return err
+	}
+
+	cc := raftpb.ConfChange{
+		Type:   raftpb.ConfChangeRemoveNode,
+		NodeID: nodeId,
+	}
+	h.confChangeC <- cc
+	return nil
+}
+
+func (h *httpKVAPI) deleteKV(key string, w http.ResponseWriter) error {
+	h.store.Propose(key, "", PutOp)
+	return nil
 }
 
 // serveHttpKVAPI starts a key-value server with a GET/PUT API and listens.

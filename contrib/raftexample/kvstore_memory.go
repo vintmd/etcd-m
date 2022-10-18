@@ -45,9 +45,9 @@ func (s *simpleMemoryKVStore) Lookup(key string) (string, bool) {
 	return v, ok
 }
 
-func (s *simpleMemoryKVStore) Propose(k string, v string) {
+func (s *simpleMemoryKVStore) Propose(k string, v, o string) {
 	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(kv{k, v}); err != nil {
+	if err := gob.NewEncoder(&buf).Encode(kv{k, v, o}); err != nil {
 		log.Fatal(err)
 	}
 	s.proposeC <- buf.String()
@@ -77,9 +77,13 @@ func (s *simpleMemoryKVStore) ReadCommits(commitC <-chan *string, errorC <-chan 
 		if err := dec.Decode(&dataKv); err != nil {
 			log.Fatalf("raftexample: could not decode message (%v)", err)
 		}
-		log.Printf("key %s", dataKv.Key)
+		log.Printf("key %s op %s", dataKv.Key, dataKv.Op)
 		s.mu.Lock()
-		s.kvStore[dataKv.Key] = dataKv.Val
+		if dataKv.Op == PutOp {
+			s.kvStore[dataKv.Key] = dataKv.Val
+		} else if dataKv.Op == DeleteOp {
+			delete(s.kvStore, dataKv.Key)
+		}
 		s.mu.Unlock()
 	}
 	if err, ok := <-errorC; ok {

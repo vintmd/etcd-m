@@ -25,7 +25,7 @@ type KVStore interface {
 	Lookup(key string) (string, bool)
 
 	// Propose propose kv request into raft state machine
-	Propose(k, v string)
+	Propose(k, v, o string)
 
 	// ReadCommits consume entry from raft state machine into KvStore map until error
 	ReadCommits(commitC <-chan *string, errorC <-chan error)
@@ -64,4 +64,10 @@ func newKVStore(config *backendConfig, snapshotter *snap.Snapshotter, proposeC c
 type kv struct {
 	Key string
 	Val string
+	Op  string
 }
+
+const (
+	PutOp = "PutOp"
+	DeleteOp = "DeleteOp"
+)
