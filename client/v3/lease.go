@@ -354,6 +354,7 @@ func (l *lessor) keepAliveCtxCloser(ctx context.Context, id LeaseID, donec <-cha
 	}
 	// remove if no one more listeners
 	if len(ka.chs) == 0 {
+		l.lg.Debug("lessor remove ")
 		delete(l.keepAlives, id)
 	}
 }
