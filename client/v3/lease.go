@@ -16,12 +16,12 @@ package clientv3
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -343,6 +343,8 @@ func (l *lessor) keepAliveCtxCloser(ctx context.Context, id LeaseID, donec <-cha
 		return
 	}
 
+	sessionLease := fmt.Sprintf("%x", id)
+	l.lg.Debug("lessor keep alive ctx close", zap.String("id", sessionLease))
 	// close channel and remove context if still associated with keep alive
 	for i, c := range ka.ctxs {
 		if c == ctx {
@@ -449,17 +451,24 @@ func (l *lessor) recvKeepAliveLoop() (gerr error) {
 		stream, err := l.resetRecv()
 		if err != nil {
 			if canceledByCaller(l.stopCtx, err) {
+				l.lg.Error("lessor recv keep alive failed return",
+					zap.Error(err))
 				return err
 			}
+			l.lg.Debug("lessor recv keep alive failed not return", zap.Error(err))
 		} else {
 			for {
 				resp, err := stream.Recv()
 				if err != nil {
 					if canceledByCaller(l.stopCtx, err) {
+						l.lg.Error("lessor recv keep alive recv failed to return",
+							zap.Error(err))
 						return err
 					}
 
 					if toErr(l.stopCtx, err) == rpctypes.ErrNoLeader {
+						l.lg.Error("lessor recv keep alive recv failed no leader",
+							zap.Error(err))
 						l.closeRequireLeader()
 					}
 					break
@@ -515,8 +524,10 @@ func (l *lessor) recvKeepAlive(resp *pb.LeaseKeepAliveResponse) {
 		return
 	}
 
+	sessionLease := fmt.Sprintf("%x", karesp.ID)
 	if karesp.TTL <= 0 {
 		// lease expired; close all keep alive channels
+		l.lg.Debug("recv keep alive ttl done", zap.String("id", sessionLease))
 		delete(l.keepAlives, karesp.ID)
 		ka.close()
 		return
@@ -525,6 +536,11 @@ func (l *lessor) recvKeepAlive(resp *pb.LeaseKeepAliveResponse) {
 	// send update to all channels
 	nextKeepAlive := time.Now().Add((time.Duration(karesp.TTL) * time.Second) / 3.0)
 	ka.deadline = time.Now().Add(time.Duration(karesp.TTL) * time.Second)
+
+	l.lg.Debug("recv keep alive detail", zap.String("id", sessionLease),
+		zap.Int64("next-keep-alive", nextKeepAlive.Unix()),
+		zap.Int64("deadline", ka.deadline.Unix()))
+
 	for _, ch := range ka.chs {
 		select {
 		case ch <- karesp:
@@ -557,6 +573,9 @@ func (l *lessor) deadlineLoop() {
 				// waited too long for response; lease may be expired
 				ka.close()
 				delete(l.keepAlives, id)
+				sessionLease := fmt.Sprintf("%x", id)
+				l.lg.Debug("dead line loop", zap.String("id", sessionLease),
+					zap.Int64("deadline", ka.deadline.Unix()))
 			}
 		}
 		l.mu.Unlock()
@@ -571,16 +590,23 @@ func (l *lessor) sendKeepAliveLoop(stream pb.Lease_LeaseKeepAliveClient) {
 		now := time.Now()
 		l.mu.Lock()
 		for id, ka := range l.keepAlives {
+			sessionLease := fmt.Sprintf("%x", id)
 			if ka.nextKeepAlive.Before(now) {
+				l.lg.Debug("lessor keep alive target is right", zap.String("id", sessionLease))
 				tosend = append(tosend, id)
+			} else {
+				l.lg.Debug("lessor keep alive target is wrong", zap.String("id", sessionLease))
 			}
 		}
 		l.mu.Unlock()
 
 		for _, id := range tosend {
+			sessionLease := fmt.Sprintf("%x", id)
 			r := &pb.LeaseKeepAliveRequest{ID: int64(id)}
 			if err := stream.Send(r); err != nil {
 				// TODO do something with this error?
+				l.lg.Error("send keep alive failed",
+					zap.String("id", sessionLease), zap.Error(err))
 				return
 			}
 		}
