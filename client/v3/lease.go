@@ -174,6 +174,9 @@ type lessor struct {
 	callOpts []grpc.CallOption
 
 	lg *zap.Logger
+
+	ctRecv int64
+	ctSend int64
 }
 
 // keepAlive multiplexes a keepalive for a lease over multiple channels
@@ -354,6 +357,7 @@ func (l *lessor) keepAliveCtxCloser(ctx context.Context, id LeaseID, donec <-cha
 	}
 	// remove if no one more listeners
 	if len(ka.chs) == 0 {
+		l.lg.Info("ctx closer closed remove lease", zap.Int64("id", int64(id)))
 		delete(l.keepAlives, id)
 	}
 }
@@ -425,6 +429,7 @@ func (l *lessor) keepAliveOnce(ctx context.Context, id LeaseID) (*LeaseKeepAlive
 }
 
 func (l *lessor) recvKeepAliveLoop() (gerr error) {
+	l.ctRecv++
 	defer func() {
 		l.mu.Lock()
 		close(l.donec)
@@ -444,6 +449,7 @@ func (l *lessor) recvKeepAliveLoop() (gerr error) {
 			}
 		} else {
 			for {
+				s := time.Now()
 				resp, err := stream.Recv()
 				if err != nil {
 					if canceledByCaller(l.stopCtx, err) {
@@ -455,8 +461,13 @@ func (l *lessor) recvKeepAliveLoop() (gerr error) {
 					}
 					break
 				}
-
+				sd := time.Since(s)
 				l.recvKeepAlive(resp)
+				l.lg.Info("recv keepalive response done", zap.Int64("lease-id", int64(resp.ID)),
+					zap.Int64("recv-cost-ms", sd.Milliseconds()),
+					zap.Int64("solve-cost-ms", (time.Since(s)-sd).Milliseconds()),
+					zap.Int64("ttl", int64(resp.TTL)),
+					zap.Int64("ctRecv", l.ctRecv))
 			}
 		}
 
@@ -547,6 +558,8 @@ func (l *lessor) deadlineLoop() {
 			if ka.deadline.Before(now) {
 				// waited too long for response; lease may be expired
 				ka.close()
+				l.lg.Info("deadline remove lease", zap.Int64("id", int64(id)),
+					zap.Int64("deadline", ka.deadline.Unix()))
 				delete(l.keepAlives, id)
 			}
 		}
@@ -556,6 +569,7 @@ func (l *lessor) deadlineLoop() {
 
 // sendKeepAliveLoop sends keep alive requests for the lifetime of the given stream.
 func (l *lessor) sendKeepAliveLoop(stream pb.Lease_LeaseKeepAliveClient) {
+	l.ctSend++
 	for {
 		var tosend []LeaseID
 
@@ -564,18 +578,31 @@ func (l *lessor) sendKeepAliveLoop(stream pb.Lease_LeaseKeepAliveClient) {
 		for id, ka := range l.keepAlives {
 			if ka.nextKeepAlive.Before(now) {
 				tosend = append(tosend, id)
+			} else {
+				l.lg.Info("sending skip keepalive request for lease", zap.Int64("lease-id", int64(id)),
+					zap.String("next-keepalive", ka.nextKeepAlive.String()),
+					zap.Int64("stamp", now.Unix()))
 			}
 		}
 		l.mu.Unlock()
 
+		bs := time.Now()
 		for _, id := range tosend {
 			r := &pb.LeaseKeepAliveRequest{ID: int64(id)}
+			s := time.Now()
 			if err := stream.Send(r); err != nil {
 				// TODO do something with this error?
 				return
 			}
+			l.lg.Info("sending keepalive request", zap.Int64("lease-id", int64(id)),
+				zap.Int64("cost-ms", time.Since(s).Milliseconds()),
+				zap.Int64("stamp", now.Unix()))
 		}
 
+		l.lg.Info("sending batch leases", zap.Int("send-count", len(tosend)),
+			zap.Int64("cost-ms", time.Since(bs).Milliseconds()),
+			zap.Int64("stamp", now.Unix()),
+			zap.Int64("ct", l.ctSend))
 		select {
 		case <-time.After(retryConnWait):
 		case <-stream.Context().Done():
